@@ -41,12 +41,10 @@ Designed for solo practitioners and small firms that want a fast, offline tool w
 
 ## Getting started
 
-**No Python?** Download the standalone Windows executable from the [latest release](https://github.com/JoaquinRanaPallero/q4-legal-case-management/releases/latest) — no installation required.
-
-Or run from source:
+Run from source:
 
 ```bash
-git clone https://github.com/JoaquinRanaPallero/q4-legal-case-management.git
+git clone https://github.com/joaquintomasrana/q4-legal-case-management.git
 cd q4-legal-case-management
 python main.py
 ```
