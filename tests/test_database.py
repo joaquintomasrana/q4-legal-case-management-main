@@ -15,6 +15,20 @@ from models import (ArchivoAdjunto, Expediente, Gasto, Honorario, Parte,
                     PasoProcesal, Vencimiento)
 
 
+def _fetchall(db_path, sql, params=()):
+    """Runs a read query on a raw connection that is closed explicitly.
+
+    `with sqlite3.connect(...)` manages the transaction but does NOT close
+    the connection; on Windows the lingering handle locks the .db file and
+    breaks TemporaryDirectory cleanup (WinError 32).
+    """
+    conn = sqlite3.connect(db_path)
+    try:
+        return conn.execute(sql, params).fetchall()
+    finally:
+        conn.close()
+
+
 class DatabaseTestCase(unittest.TestCase):
     def setUp(self):
         self._tmpdir = tempfile.TemporaryDirectory()
@@ -38,9 +52,8 @@ class DatabaseTestCase(unittest.TestCase):
 
 class TestInit(DatabaseTestCase):
     def test_creates_all_tables(self):
-        with sqlite3.connect(self.db_path) as conn:
-            tablas = {r[0] for r in conn.execute(
-                "SELECT name FROM sqlite_master WHERE type='table'")}
+        tablas = {r[0] for r in _fetchall(
+            self.db_path, "SELECT name FROM sqlite_master WHERE type='table'")}
         esperadas = {"expedientes", "partes", "pasos_procesales", "vencimientos",
                      "honorarios", "gastos", "archivos_adjuntos"}
         self.assertTrue(esperadas.issubset(tablas))
@@ -129,10 +142,10 @@ class TestCascadeDelete(DatabaseTestCase):
 
         for tabla in ("partes", "pasos_procesales", "vencimientos",
                       "honorarios", "gastos", "archivos_adjuntos"):
-            with sqlite3.connect(self.db_path) as conn:
-                count = conn.execute(
-                    f"SELECT COUNT(*) FROM {tabla} WHERE expediente_id=?",
-                    (exp_id,)).fetchone()[0]
+            count = _fetchall(
+                self.db_path,
+                f"SELECT COUNT(*) FROM {tabla} WHERE expediente_id=?",
+                (exp_id,))[0][0]
             self.assertEqual(count, 0, f"rows left in {tabla}")
 
 
@@ -200,8 +213,10 @@ class TestMigraciones(unittest.TestCase):
         db._get_db_path = lambda: self.db_path
         self.addCleanup(self._restore_db_path)
 
-        # Build a legacy database by hand
-        with sqlite3.connect(self.db_path) as conn:
+        # Build a legacy database by hand. The connection is closed
+        # explicitly so Windows does not keep the .db file locked.
+        conn = sqlite3.connect(self.db_path)
+        try:
             conn.execute("PRAGMA foreign_keys = ON")
             conn.executescript("""
                 CREATE TABLE expedientes (
@@ -254,6 +269,9 @@ class TestMigraciones(unittest.TestCase):
                 INSERT INTO honorarios (expediente_id, fecha, monto, forma_pago)
                     VALUES (1, '2020-06-01', 5000, 'transferencia');
             """)
+            conn.commit()
+        finally:
+            conn.close()
 
     def _restore_db_path(self):
         db._get_db_path = self._original_get_db_path
@@ -270,9 +288,8 @@ class TestMigraciones(unittest.TestCase):
         venc = db.listar_vencimientos(1)[0]
         self.assertEqual(venc.estado, "completed")
 
-        with sqlite3.connect(self.db_path) as conn:
-            forma = conn.execute(
-                "SELECT forma_pago FROM honorarios WHERE id=1").fetchone()[0]
+        forma = _fetchall(self.db_path,
+                          "SELECT forma_pago FROM honorarios WHERE id=1")[0][0]
         self.assertEqual(forma, "transfer")
 
     def test_numero_becomes_nullable(self):
@@ -283,13 +300,11 @@ class TestMigraciones(unittest.TestCase):
 
     def test_child_fks_point_to_expedientes_after_migration(self):
         db.init_db()
-        with sqlite3.connect(self.db_path) as conn:
-            for tabla in ("partes", "vencimientos", "honorarios"):
-                refs = conn.execute(
-                    f"PRAGMA foreign_key_list({tabla})").fetchall()
-                self.assertTrue(refs, f"{tabla} lost its foreign keys")
-                self.assertEqual(refs[0][2], "expedientes",
-                                 f"{tabla} FK points to {refs[0][2]}")
+        for tabla in ("partes", "vencimientos", "honorarios"):
+            refs = _fetchall(self.db_path, f"PRAGMA foreign_key_list({tabla})")
+            self.assertTrue(refs, f"{tabla} lost its foreign keys")
+            self.assertEqual(refs[0][2], "expedientes",
+                             f"{tabla} FK points to {refs[0][2]}")
 
     def test_migration_is_idempotent(self):
         db.init_db()
@@ -300,10 +315,10 @@ class TestMigraciones(unittest.TestCase):
     def test_cascade_still_works_after_migration(self):
         db.init_db()
         db.eliminar_expediente(1)
-        with sqlite3.connect(self.db_path) as conn:
-            for tabla in ("partes", "vencimientos", "honorarios"):
-                count = conn.execute(f"SELECT COUNT(*) FROM {tabla}").fetchone()[0]
-                self.assertEqual(count, 0, f"rows left in {tabla}")
+        for tabla in ("partes", "vencimientos", "honorarios"):
+            count = _fetchall(self.db_path,
+                              f"SELECT COUNT(*) FROM {tabla}")[0][0]
+            self.assertEqual(count, 0, f"rows left in {tabla}")
 
 
 if __name__ == "__main__":
