@@ -109,14 +109,28 @@ q4-legal-case-management/
 |   |-- honorarios.py          # Global fees panel
 |   |-- dialogs.py             # Generic form dialog, validation, date helpers
 |   `-- styles.py              # ttk theme and color palette
+|-- tests/
+|   `-- test_database.py       # unittest suite for the database layer
 `-- docs/
     `-- ARCHITECTURE.md        # Design decisions and database schema
 ```
 
 For a deeper look at the design — layering, database schema, the migration system and other decisions — see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
+## Running tests
+
+```bash
+python -m unittest discover -v
+```
+
+The suite covers the database layer — CRUD, accent-insensitive search, cascade deletes, backup rotation and the legacy migration path — against throwaway databases in temporary directories. It also runs on every push via GitHub Actions.
+
 ## Notes
 
 - The application is designed for local, single-user use.
 - On Windows it enables per-monitor DPI awareness for a sharp UI on high-resolution displays.
 - The UI is in English; the database file and folder names (`expedientes.db`, `adjuntos/`) are kept stable for backward compatibility with existing installations.
+
+## License
+
+[MIT](LICENSE)

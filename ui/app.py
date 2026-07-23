@@ -15,7 +15,10 @@ class App(tk.Tk):
         self.title("Q4 Legal Case Management")
         self.geometry("1200x700")
         self.minsize(900, 550)
-        self.state("zoomed")  # Start maximized
+        try:
+            self.state("zoomed")  # Start maximized (Windows and some Linux WMs)
+        except tk.TclError:
+            pass  # Window manager does not support "zoomed"; keep default size
         self.configure(bg=COLOR_BG)
 
         configurar_estilos(self)

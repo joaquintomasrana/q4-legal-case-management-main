@@ -5,12 +5,24 @@ from tkinter import ttk, messagebox, filedialog
 from datetime import datetime, timedelta
 import os
 import shutil
+import subprocess
+import sys
 
 import database as db
 from models import Parte, PasoProcesal, Vencimiento, Honorario, Gasto, ArchivoAdjunto
 from ui.dialogs import FormDialog, confirmar, fecha_hoy, fecha_display, normalizar_monto
 from ui.styles import COLOR_VENCIDO, COLOR_INMINENTE, COLOR_CUMPLIDO
 from ui.honorarios import _fmt_monto
+
+
+def _open_path(path: str) -> None:
+    """Opens a file or folder with the OS default handler (cross-platform)."""
+    if sys.platform == "win32":
+        os.startfile(path)  # type: ignore[attr-defined]
+    elif sys.platform == "darwin":
+        subprocess.Popen(["open", path])
+    else:
+        subprocess.Popen(["xdg-open", path])
 
 
 class VentanaDetalleExpediente(tk.Toplevel):
@@ -664,7 +676,7 @@ class VentanaDetalleExpediente(tk.Toplevel):
         carpeta = os.path.join(db._get_adjuntos_dir(), str(self.exp_id))
         if not os.path.exists(carpeta):
             os.makedirs(carpeta, exist_ok=True)
-        os.startfile(carpeta)
+        _open_path(carpeta)
 
     def _abrir_adjunto(self):
         sel = self.tree_adjuntos.selection()
@@ -679,7 +691,7 @@ class VentanaDetalleExpediente(tk.Toplevel):
         if not os.path.exists(adj.ruta):
             messagebox.showerror("Error", f"The file could not be found at:\n{adj.ruta}", parent=self)
             return
-        os.startfile(adj.ruta)
+        _open_path(adj.ruta)
 
     def _eliminar_adjunto(self):
         sel = self.tree_adjuntos.selection()
