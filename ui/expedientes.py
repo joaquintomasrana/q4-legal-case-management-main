@@ -1,5 +1,6 @@
 """Case list and management panel."""
 
+import sqlite3
 import tkinter as tk
 from tkinter import ttk, messagebox
 
@@ -22,6 +23,13 @@ def _campos_expediente():
          "options": ["active", "archived", "closed"], "default": "active"},
         {"name": "observaciones", "label": "Notes", "type": "text"},
     ]
+
+
+def _valores_reintento(r: dict) -> dict:
+    """Re-feeds a submitted form back into the dialog (dates back to display format)."""
+    values = dict(r)
+    values["fecha_inicio"] = fecha_display(r["fecha_inicio"])
+    return values
 
 
 class PanelExpedientes(ttk.Frame):
@@ -172,30 +180,44 @@ class PanelExpedientes(ttk.Frame):
             return None
         return int(sel[0])
 
+    def _avisar_numero_duplicado(self, numero: str):
+        messagebox.showwarning("Duplicate number",
+                               f"A case with number '{numero}' already exists.\n"
+                               "Change the number, or clear it to save the case without one.",
+                               parent=self)
+
     def _nuevo(self):
-        dlg = FormDialog(self, "New Case", _campos_expediente())
-        self.wait_window(dlg)
-        if dlg.result:
+        values = None
+        while True:
+            dlg = FormDialog(self, "New Case", _campos_expediente(), values)
+            self.wait_window(dlg)
+            if not dlg.result:
+                return
             r = dlg.result
-            numero = r["numero"]
-            if numero and db.numero_existe(numero):
-                messagebox.showwarning("Duplicate number",
-                                       f"A case with number '{numero}' already exists.\n"
-                                       "The case will be saved without a number.",
-                                       parent=self)
-                numero = ""
+            # Re-open the dialog with the entered data so the user can fix the
+            # number instead of losing it (or the rest of the form)
+            if r["numero"] and db.numero_existe(r["numero"]):
+                self._avisar_numero_duplicado(r["numero"])
+                values = _valores_reintento(r)
+                continue
             exp = Expediente(
-                numero=numero, caratula=r["caratula"],
+                numero=r["numero"], caratula=r["caratula"],
                 fuero_juzgado=r["fuero_juzgado"], fecha_inicio=r["fecha_inicio"],
                 tipo_proceso=r["tipo_proceso"], estado=r["estado"],
                 observaciones=r["observaciones"],
             )
             try:
                 db.crear_expediente(exp)
+            except sqlite3.IntegrityError:
+                # Duplicate created between the pre-check and the INSERT
+                self._avisar_numero_duplicado(r["numero"])
+                values = _valores_reintento(r)
+                continue
             except Exception as e:
                 messagebox.showerror("Error", f"Could not create the case:\n{e}", parent=self)
                 return
             self.refrescar()
+            return
 
     def _editar(self):
         exp_id = self._get_selected_id()
@@ -211,18 +233,17 @@ class PanelExpedientes(ttk.Frame):
             "tipo_proceso": exp.tipo_proceso, "estado": exp.estado,
             "observaciones": exp.observaciones,
         }
-        dlg = FormDialog(self, "Edit Case", _campos_expediente(), values)
-        self.wait_window(dlg)
-        if dlg.result:
+        while True:
+            dlg = FormDialog(self, "Edit Case", _campos_expediente(), values)
+            self.wait_window(dlg)
+            if not dlg.result:
+                return
             r = dlg.result
-            numero = r["numero"]
-            if numero and db.numero_existe(numero, excluir_id=exp_id):
-                messagebox.showwarning("Duplicate number",
-                                       f"Another case with number '{numero}' already exists.\n"
-                                       "The case will be saved without a number.",
-                                       parent=self)
-                numero = ""
-            exp.numero = numero
+            if r["numero"] and db.numero_existe(r["numero"], excluir_id=exp_id):
+                self._avisar_numero_duplicado(r["numero"])
+                values = _valores_reintento(r)
+                continue
+            exp.numero = r["numero"]
             exp.caratula = r["caratula"]
             exp.fuero_juzgado = r["fuero_juzgado"]
             exp.fecha_inicio = r["fecha_inicio"]
@@ -231,10 +252,15 @@ class PanelExpedientes(ttk.Frame):
             exp.observaciones = r["observaciones"]
             try:
                 db.actualizar_expediente(exp)
+            except sqlite3.IntegrityError:
+                self._avisar_numero_duplicado(r["numero"])
+                values = _valores_reintento(r)
+                continue
             except Exception as e:
                 messagebox.showerror("Error", f"Could not update the case:\n{e}", parent=self)
                 return
             self.refrescar()
+            return
 
     def _eliminar(self):
         exp_id = self._get_selected_id()

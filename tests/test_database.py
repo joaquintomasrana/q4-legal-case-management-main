@@ -201,6 +201,102 @@ class TestConsultas(DatabaseTestCase):
         self.assertEqual([v["descripcion"] for v in pending], ["Futuro"])
 
 
+class TestAdjuntos(DatabaseTestCase):
+    def test_ruta_relativa_se_resuelve_bajo_adjuntos(self):
+        ruta = db.ruta_abs_adjunto("5/contrato.pdf")
+        self.assertTrue(ruta.endswith(os.path.join("adjuntos", "5", "contrato.pdf")))
+
+    def test_eliminar_adjunto_devuelve_ruta(self):
+        exp_id = self._crear_expediente()
+        adj_id = db.crear_adjunto(ArchivoAdjunto(
+            expediente_id=exp_id, nombre_archivo="a.pdf",
+            ruta=f"{exp_id}/a.pdf", fecha="2026-01-01"))
+        self.assertEqual(db.eliminar_adjunto(adj_id), f"{exp_id}/a.pdf")
+        self.assertIsNone(db.eliminar_adjunto(adj_id))
+
+    def test_migracion_convierte_rutas_absolutas_a_relativas(self):
+        exp_id = self._crear_expediente()
+        db.crear_adjunto(ArchivoAdjunto(
+            expediente_id=exp_id, nombre_archivo="unix.pdf",
+            ruta="/viejo/lugar/adjuntos/9/unix.pdf", fecha="2026-01-01"))
+        db.crear_adjunto(ArchivoAdjunto(
+            expediente_id=exp_id, nombre_archivo="win.pdf",
+            ruta="C:\\viejo\\adjuntos\\9\\win.pdf", fecha="2026-01-01"))
+        db.crear_adjunto(ArchivoAdjunto(
+            expediente_id=exp_id, nombre_archivo="rel.pdf",
+            ruta=f"{exp_id}/rel.pdf", fecha="2026-01-01"))
+
+        db.init_db()  # runs migrations
+
+        rutas = {a.nombre_archivo: a.ruta for a in db.listar_adjuntos(exp_id)}
+        self.assertEqual(rutas["unix.pdf"], f"{exp_id}/unix.pdf")
+        self.assertEqual(rutas["win.pdf"], f"{exp_id}/win.pdf")
+        self.assertEqual(rutas["rel.pdf"], f"{exp_id}/rel.pdf")
+
+
+class TestReparacionFK(unittest.TestCase):
+    """Databases corrupted by the old migration (FKs pointing to
+    _expedientes_old) are repaired by rebuilding the affected tables."""
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmpdir.cleanup)
+        self.db_path = os.path.join(self._tmpdir.name, "expedientes.db")
+
+        self._original_get_db_path = db._get_db_path
+        db._get_db_path = lambda: self.db_path
+        self.addCleanup(self._restore_db_path)
+
+        # FK enforcement is off by default, so rows referencing the
+        # nonexistent _expedientes_old table can be inserted.
+        conn = sqlite3.connect(self.db_path)
+        try:
+            conn.executescript("""
+                CREATE TABLE expedientes (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    numero TEXT UNIQUE,
+                    caratula TEXT NOT NULL,
+                    fuero_juzgado TEXT DEFAULT '',
+                    fecha_inicio TEXT DEFAULT '',
+                    tipo_proceso TEXT DEFAULT '',
+                    estado TEXT DEFAULT 'active' CHECK(estado IN ('active','archived','closed')),
+                    observaciones TEXT DEFAULT ''
+                );
+                CREATE TABLE partes (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    expediente_id INTEGER NOT NULL,
+                    nombre TEXT NOT NULL,
+                    tipo TEXT DEFAULT '',
+                    dni_cuit TEXT DEFAULT '',
+                    domicilio TEXT DEFAULT '',
+                    telefono TEXT DEFAULT '',
+                    email TEXT DEFAULT '',
+                    FOREIGN KEY (expediente_id) REFERENCES _expedientes_old(id) ON DELETE CASCADE
+                );
+                INSERT INTO expedientes (numero, caratula) VALUES ('7/2021', 'Caso corrupto');
+                INSERT INTO partes (expediente_id, nombre) VALUES (1, 'Juan');
+            """)
+            conn.commit()
+        finally:
+            conn.close()
+
+    def _restore_db_path(self):
+        db._get_db_path = self._original_get_db_path
+
+    def test_fk_repaired_and_data_preserved(self):
+        db.init_db()
+        refs = _fetchall(self.db_path, "PRAGMA foreign_key_list(partes)")
+        self.assertTrue(refs)
+        self.assertEqual(refs[0][2], "expedientes")
+        self.assertEqual(db.listar_partes(1)[0].nombre, "Juan")
+
+    def test_cascade_works_after_repair(self):
+        db.init_db()
+        db.eliminar_expediente(1)
+        count = _fetchall(self.db_path, "SELECT COUNT(*) FROM partes")[0][0]
+        self.assertEqual(count, 0)
+
+
 class TestMigraciones(unittest.TestCase):
     """Legacy databases (Spanish statuses, NOT NULL numero) upgrade in place."""
 

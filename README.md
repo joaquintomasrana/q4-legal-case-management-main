@@ -60,7 +60,7 @@ That's it. The database (`expedientes.db`) is created automatically on first run
 - **Dates** are entered and displayed as `DD/MM/YYYY`; they are stored internally as ISO (`YYYY-MM-DD`) so sorting and comparisons are always correct.
 - **Dialogs**: `Enter` saves, `Escape` cancels.
 - **Double-click** a case row to jump straight to its Procedural Steps tab.
-- **Amounts** accept dots as thousands separators (`1.500.000` → `1500000`).
+- **Amounts** use Argentine formatting: dots as thousands separators and a comma for decimals (`1.500.000,50` → `1500000.50`). A decimal point (`10.50`) is rejected as ambiguous rather than misread.
 
 ## Importing cases from CSV
 

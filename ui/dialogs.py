@@ -1,5 +1,6 @@
 """Reusable dialogs for forms and confirmations."""
 
+import re
 import tkinter as tk
 from tkinter import ttk, messagebox
 from datetime import datetime
@@ -47,21 +48,30 @@ def fecha_to_iso(fecha_display_str: str) -> str:
 # --- Other validations ---
 
 def normalizar_monto(monto_str: str) -> str:
-    """Normalizes integer amounts. Dots are treated as thousands separators and removed."""
+    """Normalizes an amount in Argentine format to a plain decimal string.
+
+    Dots are thousands separators and must group digits in threes
+    ("1.500.000"); the comma is the decimal separator ("1.500.000,50" ->
+    "1500000.50"). Returns "" for invalid input, so a mistyped decimal
+    point like "10.50" is rejected instead of silently read as 1050.
+    """
     if not monto_str:
-        return monto_str
-    return monto_str.strip().replace(" ", "").replace(".", "")
+        return ""
+    s = monto_str.strip().replace(" ", "")
+    entero, sep, decimal = s.partition(",")
+    if sep and not re.fullmatch(r"\d{1,2}", decimal):
+        return ""
+    if "." in entero:
+        if not re.fullmatch(r"\d{1,3}(\.\d{3})+", entero):
+            return ""
+        entero = entero.replace(".", "")
+    elif not entero.isdigit():
+        return ""
+    return entero + (f".{decimal}" if sep else "")
 
 
 def validar_monto(monto_str: str) -> bool:
-    try:
-        normalizado = normalizar_monto(monto_str)
-        if not normalizado:
-            return False
-        val = int(normalizado)
-        return val >= 0
-    except (ValueError, TypeError):
-        return False
+    return normalizar_monto(monto_str) != ""
 
 
 class FormDialog(tk.Toplevel):
@@ -157,7 +167,8 @@ class FormDialog(tk.Toplevel):
                 return
             if field.get("validate") == "monto" and not validar_monto(result[field["name"]]):
                 messagebox.showwarning("Invalid amount",
-                                       f"The field '{field['label']}' must be a positive number.",
+                                       f"The field '{field['label']}' must be a valid amount, "
+                                       "e.g. 1.500.000,50 (dots for thousands, comma for decimals).",
                                        parent=self)
                 return
 

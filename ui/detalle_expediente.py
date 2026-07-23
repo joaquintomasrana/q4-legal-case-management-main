@@ -467,7 +467,7 @@ class VentanaDetalleExpediente(tk.Toplevel):
         self.wait_window(dlg)
         if dlg.result:
             r = dlg.result
-            monto = int(normalizar_monto(r["monto"]))
+            monto = float(normalizar_monto(r["monto"]))
             if not confirmar(self, f"Record a fee of {r['moneda']} {_fmt_monto(monto)}?"):
                 return
             try:
@@ -551,7 +551,7 @@ class VentanaDetalleExpediente(tk.Toplevel):
         self.wait_window(dlg)
         if dlg.result:
             r = dlg.result
-            monto = int(normalizar_monto(r["monto"]))
+            monto = float(normalizar_monto(r["monto"]))
             if not confirmar(self, f"Record an expense of {r['moneda']} {_fmt_monto(monto)}?"):
                 return
             try:
@@ -658,7 +658,7 @@ class VentanaDetalleExpediente(tk.Toplevel):
                     db.crear_adjunto(ArchivoAdjunto(
                         expediente_id=self.exp_id,
                         nombre_archivo=nombre,
-                        ruta=ruta_destino,
+                        ruta=f"{self.exp_id}/{nombre}",
                         fecha=datetime.now().strftime("%Y-%m-%d"),
                         descripcion=descripcion,
                     ))
@@ -688,10 +688,11 @@ class VentanaDetalleExpediente(tk.Toplevel):
         adj = next((a for a in adjuntos if a.id == adj_id), None)
         if not adj:
             return
-        if not os.path.exists(adj.ruta):
-            messagebox.showerror("Error", f"The file could not be found at:\n{adj.ruta}", parent=self)
+        ruta = db.ruta_abs_adjunto(adj.ruta)
+        if not os.path.exists(ruta):
+            messagebox.showerror("Error", f"The file could not be found at:\n{ruta}", parent=self)
             return
-        _open_path(adj.ruta)
+        _open_path(ruta)
 
     def _eliminar_adjunto(self):
         sel = self.tree_adjuntos.selection()
@@ -699,14 +700,13 @@ class VentanaDetalleExpediente(tk.Toplevel):
             return
         if confirmar(self, "Delete the selected attachment?"):
             try:
-                adj_id = int(sel[0])
-                # Get the path before deleting the record
-                adjuntos = db.listar_adjuntos(self.exp_id)
-                adj = next((a for a in adjuntos if a.id == adj_id), None)
-                # Delete the physical file first, then the record
-                if adj and os.path.exists(adj.ruta):
-                    os.remove(adj.ruta)
-                db.eliminar_adjunto(adj_id)
+                # Delete the record first: if removing the physical file then
+                # fails, we are left with an orphan file, never a dead record.
+                ruta = db.eliminar_adjunto(int(sel[0]))
+                if ruta:
+                    ruta_fisica = db.ruta_abs_adjunto(ruta)
+                    if os.path.exists(ruta_fisica):
+                        os.remove(ruta_fisica)
             except Exception as e:
                 messagebox.showerror("Error", f"Could not delete the attachment:\n{e}", parent=self)
                 return

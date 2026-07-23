@@ -95,15 +95,16 @@ All dates are stored as `YYYY-MM-DD` text, which makes SQL `ORDER BY`, `MAX()` a
 
 ### Nullable, unique case numbers
 
-Real-world cases don't always have a court number yet. `numero` is nullable but `UNIQUE`: SQLite allows multiple `NULL`s in a unique column, so any number of unnumbered cases can coexist while duplicates among real numbers are still rejected. Empty strings are converted to `NULL` on write. The UI additionally pre-checks duplicates (`numero_existe`) to warn the user instead of failing on the constraint.
+Real-world cases don't always have a court number yet. `numero` is nullable but `UNIQUE`: SQLite allows multiple `NULL`s in a unique column, so any number of unnumbered cases can coexist while duplicates among real numbers are still rejected. Empty strings are converted to `NULL` on write. The UI pre-checks duplicates (`numero_existe`) and, on a hit — or on the `IntegrityError` the constraint raises if a duplicate slips past the pre-check — re-opens the form with the entered data so the user can correct the number instead of losing it.
 
 ### Migrations
 
 `init_db()` runs `CREATE TABLE IF NOT EXISTS` for the current schema, then `_migrate_db()` upgrades older databases in place:
 
-1. **Legacy `NOT NULL` case numbers and Spanish status values** — the affected tables are rebuilt with the rename → recreate → copy → drop pattern, translating row values (`activo` → `active`, `pendiente` → `pending`, …) with a `CASE` expression during the copy.
-2. **FK repair** — SQLite's `ALTER TABLE RENAME` rewrites child-table foreign keys to point at the renamed (old) table, corrupting them for this pattern. `_fix_fk_references()` repairs the schema text via `PRAGMA writable_schema` after each rebuild.
+1. **Legacy `NOT NULL` case numbers and Spanish status values** — the affected tables are rebuilt with the rename → recreate → copy → drop pattern, translating row values (`activo` → `active`, `pendiente` → `pending`, …) with a `CASE` expression during the copy. Renames run with `PRAGMA legacy_alter_table` so SQLite does not rewrite child-table foreign keys, and each rebuild is wrapped in a transaction so a crash mid-migration rolls back instead of leaving the schema half-converted.
+2. **FK repair** — databases migrated by older versions of the app can carry foreign keys pointing at `_expedientes_old`. `_reparar_fks_corruptas()` detects them via `PRAGMA foreign_key_list` and rebuilds each affected child table from its canonical schema.
 3. **Free-text value translation** — columns without `CHECK` constraints (`partes.tipo`, `honorarios.forma_pago`) are translated with idempotent `UPDATE … CASE` statements.
+4. **Attachment paths** — legacy absolute paths in `archivos_adjuntos.ruta` are rewritten as `<case_id>/<file>`, relative to the `adjuntos/` dir.
 
 All migrations are safe to run repeatedly; a database that is already current passes through untouched.
 
@@ -113,7 +114,7 @@ Before touching the database, every launch copies `expedientes.db` into `backups
 
 ### Attachments are copies, not references
 
-Attaching a file copies it into `adjuntos/<case_id>/` (name collisions get a numeric suffix), so the record stays valid even if the original file moves. Writes are ordered to avoid orphans: if the DB insert fails, the copied file is removed; on deletion, the physical file is removed before the record. Deleting a whole case also removes its attachment folder.
+Attaching a file copies it into `adjuntos/<case_id>/` (name collisions get a numeric suffix), so the record stays valid even if the original file moves. Paths are stored relative to the `adjuntos/` dir (`<case_id>/<file>`) and resolved through `ruta_abs_adjunto()`, so moving or restoring the whole app folder never breaks attachments. Writes are ordered to avoid dead records: if the DB insert fails, the copied file is removed; on deletion, the record is removed first and the physical file after — a failure can leave an orphan file, never a record pointing at nothing. Deleting a whole case also removes its attachment folder.
 
 ### Portable / frozen execution
 

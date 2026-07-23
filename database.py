@@ -4,6 +4,7 @@ import shutil
 import sqlite3
 import sys
 import os
+import re
 import unicodedata
 from contextlib import contextmanager
 from datetime import datetime
@@ -48,37 +49,144 @@ def _connect():
         conn.close()
 
 
-def _fix_fk_references(conn) -> None:
-    """Repairs child tables whose FKs point to _expedientes_old instead of expedientes.
+_SCHEMA_TABLAS: dict[str, str] = {
+    "expedientes": """
+        CREATE TABLE IF NOT EXISTS expedientes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            numero TEXT UNIQUE,
+            caratula TEXT NOT NULL,
+            fuero_juzgado TEXT DEFAULT '',
+            fecha_inicio TEXT DEFAULT '',
+            tipo_proceso TEXT DEFAULT '',
+            estado TEXT DEFAULT 'active' CHECK(estado IN ('active','archived','closed')),
+            observaciones TEXT DEFAULT ''
+        )""",
+    "partes": """
+        CREATE TABLE IF NOT EXISTS partes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            expediente_id INTEGER NOT NULL,
+            nombre TEXT NOT NULL,
+            tipo TEXT DEFAULT '',
+            dni_cuit TEXT DEFAULT '',
+            domicilio TEXT DEFAULT '',
+            telefono TEXT DEFAULT '',
+            email TEXT DEFAULT '',
+            FOREIGN KEY (expediente_id) REFERENCES expedientes(id) ON DELETE CASCADE
+        )""",
+    "pasos_procesales": """
+        CREATE TABLE IF NOT EXISTS pasos_procesales (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            expediente_id INTEGER NOT NULL,
+            fecha TEXT NOT NULL,
+            descripcion TEXT NOT NULL,
+            observaciones TEXT DEFAULT '',
+            FOREIGN KEY (expediente_id) REFERENCES expedientes(id) ON DELETE CASCADE
+        )""",
+    "vencimientos": """
+        CREATE TABLE IF NOT EXISTS vencimientos (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            expediente_id INTEGER NOT NULL,
+            fecha TEXT NOT NULL,
+            descripcion TEXT NOT NULL,
+            estado TEXT DEFAULT 'pending' CHECK(estado IN ('pending','completed','overdue')),
+            FOREIGN KEY (expediente_id) REFERENCES expedientes(id) ON DELETE CASCADE
+        )""",
+    "honorarios": """
+        CREATE TABLE IF NOT EXISTS honorarios (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            expediente_id INTEGER NOT NULL,
+            fecha TEXT NOT NULL,
+            monto REAL NOT NULL,
+            moneda TEXT DEFAULT 'ARS' CHECK(moneda IN ('ARS','USD')),
+            concepto TEXT DEFAULT '',
+            forma_pago TEXT DEFAULT '',
+            FOREIGN KEY (expediente_id) REFERENCES expedientes(id) ON DELETE CASCADE
+        )""",
+    "gastos": """
+        CREATE TABLE IF NOT EXISTS gastos (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            expediente_id INTEGER NOT NULL,
+            fecha TEXT NOT NULL,
+            monto REAL NOT NULL,
+            moneda TEXT DEFAULT 'ARS' CHECK(moneda IN ('ARS','USD')),
+            descripcion TEXT DEFAULT '',
+            FOREIGN KEY (expediente_id) REFERENCES expedientes(id) ON DELETE CASCADE
+        )""",
+    "archivos_adjuntos": """
+        CREATE TABLE IF NOT EXISTS archivos_adjuntos (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            expediente_id INTEGER NOT NULL,
+            nombre_archivo TEXT NOT NULL,
+            ruta TEXT NOT NULL,
+            fecha TEXT NOT NULL,
+            descripcion TEXT DEFAULT '',
+            FOREIGN KEY (expediente_id) REFERENCES expedientes(id) ON DELETE CASCADE
+        )""",
+}
 
-    ALTER TABLE RENAME in SQLite automatically updates the FKs of child tables,
-    which corrupts the references when using the rename-recreate-drop pattern.
+
+def _reparar_fks_corruptas(conn) -> None:
+    """Rebuilds child tables whose FKs point to _expedientes_old instead of expedientes.
+
+    Databases migrated by older versions of the app can carry these corrupted
+    references (ALTER TABLE RENAME used to rewrite child FKs before the
+    migrations ran with legacy_alter_table). Each affected table is rebuilt
+    from its canonical schema inside a transaction.
     """
-    row = conn.execute(
-        "SELECT COUNT(*) as cnt FROM sqlite_master WHERE sql LIKE '%expedientes_old%'"
-    ).fetchone()
-    if row["cnt"] > 0:
-        conn.execute("PRAGMA writable_schema = ON")
-        conn.execute(
-            "UPDATE sqlite_master SET sql = REPLACE(sql, '_expedientes_old', 'expedientes') "
-            "WHERE sql LIKE '%expedientes_old%'"
-        )
-        conn.execute("PRAGMA writable_schema = OFF")
+    for tabla, create_sql in _SCHEMA_TABLAS.items():
+        if tabla == "expedientes":
+            continue
+        refs = conn.execute(f"PRAGMA foreign_key_list({tabla})").fetchall()
+        if not any(r["table"] == "_expedientes_old" for r in refs):
+            continue
+        conn.executescript(f"""
+            PRAGMA foreign_keys = OFF;
+            PRAGMA legacy_alter_table = ON;
+            BEGIN;
+            ALTER TABLE {tabla} RENAME TO _{tabla}_repair;
+            {create_sql};
+            INSERT INTO {tabla} SELECT * FROM _{tabla}_repair;
+            DROP TABLE _{tabla}_repair;
+            COMMIT;
+            PRAGMA legacy_alter_table = OFF;
+        """)
+
+
+def _migrar_rutas_adjuntos(conn) -> None:
+    """Rewrites legacy absolute attachment paths as relative to the adjuntos dir.
+
+    Attachments always live in adjuntos/<case_id>/<file>, so the relative form
+    can be derived from the row itself; this keeps records valid when the whole
+    app folder is moved or restored on another machine.
+    """
+    rows = conn.execute(
+        "SELECT id, expediente_id, nombre_archivo, ruta FROM archivos_adjuntos"
+    ).fetchall()
+    for r in rows:
+        if _es_ruta_absoluta(r["ruta"]):
+            conn.execute(
+                "UPDATE archivos_adjuntos SET ruta=? WHERE id=?",
+                (f"{r['expediente_id']}/{r['nombre_archivo']}", r["id"]),
+            )
 
 
 def _migrate_db(conn) -> None:
     """Migrations for existing databases."""
-    # Repair FKs corrupted by previous migrations
-    _fix_fk_references(conn)
+    # Repair FKs corrupted by migrations run with older versions of the app
+    _reparar_fks_corruptas(conn)
 
     # Recreate expedientes when it still has the legacy NOT NULL numero
-    # or Spanish status values in its CHECK constraint
+    # or Spanish status values in its CHECK constraint.
+    # legacy_alter_table keeps RENAME from rewriting child-table FKs, and the
+    # BEGIN/COMMIT makes the rebuild atomic (a crash mid-script rolls back).
     row = conn.execute(
         "SELECT sql FROM sqlite_master WHERE type='table' AND name='expedientes'"
     ).fetchone()
     if row and ("numero TEXT NOT NULL UNIQUE" in row["sql"] or "'activo'" in row["sql"]):
         conn.executescript("""
             PRAGMA foreign_keys = OFF;
+            PRAGMA legacy_alter_table = ON;
+            BEGIN;
             ALTER TABLE expedientes RENAME TO _expedientes_old;
             CREATE TABLE expedientes (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -101,10 +209,9 @@ def _migrate_db(conn) -> None:
                        observaciones
                 FROM _expedientes_old;
             DROP TABLE _expedientes_old;
+            COMMIT;
+            PRAGMA legacy_alter_table = OFF;
         """)
-        # RENAME updated the FKs of child tables -> repair
-        _fix_fk_references(conn)
-        conn.execute("PRAGMA foreign_keys = ON")
 
     # Recreate vencimientos when it still has Spanish status values in its CHECK
     row = conn.execute(
@@ -113,6 +220,8 @@ def _migrate_db(conn) -> None:
     if row and "'pendiente'" in row["sql"]:
         conn.executescript("""
             PRAGMA foreign_keys = OFF;
+            PRAGMA legacy_alter_table = ON;
+            BEGIN;
             ALTER TABLE vencimientos RENAME TO _vencimientos_old;
             CREATE TABLE vencimientos (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -132,7 +241,8 @@ def _migrate_db(conn) -> None:
                        END
                 FROM _vencimientos_old;
             DROP TABLE _vencimientos_old;
-            PRAGMA foreign_keys = ON;
+            COMMIT;
+            PRAGMA legacy_alter_table = OFF;
         """)
 
     # Translate legacy Spanish values in free-text columns (idempotent)
@@ -152,6 +262,13 @@ def _migrate_db(conn) -> None:
             WHEN 'otro' THEN 'other'
             ELSE forma_pago END;
     """)
+
+    # The scripts above disable FK enforcement for this connection; re-enable
+    # it here, before any DML opens a transaction (the pragma is a silent
+    # no-op inside one).
+    conn.execute("PRAGMA foreign_keys = ON")
+
+    _migrar_rutas_adjuntos(conn)
 
 
 _BACKUP_COUNT = 10
@@ -183,79 +300,8 @@ def _backup_db() -> None:
 def init_db() -> None:
     _backup_db()
     with _connect() as conn:
-        conn.executescript("""
-            CREATE TABLE IF NOT EXISTS expedientes (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                numero TEXT UNIQUE,
-                caratula TEXT NOT NULL,
-                fuero_juzgado TEXT DEFAULT '',
-                fecha_inicio TEXT DEFAULT '',
-                tipo_proceso TEXT DEFAULT '',
-                estado TEXT DEFAULT 'active' CHECK(estado IN ('active','archived','closed')),
-                observaciones TEXT DEFAULT ''
-            );
-
-            CREATE TABLE IF NOT EXISTS partes (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                expediente_id INTEGER NOT NULL,
-                nombre TEXT NOT NULL,
-                tipo TEXT DEFAULT '',
-                dni_cuit TEXT DEFAULT '',
-                domicilio TEXT DEFAULT '',
-                telefono TEXT DEFAULT '',
-                email TEXT DEFAULT '',
-                FOREIGN KEY (expediente_id) REFERENCES expedientes(id) ON DELETE CASCADE
-            );
-
-            CREATE TABLE IF NOT EXISTS pasos_procesales (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                expediente_id INTEGER NOT NULL,
-                fecha TEXT NOT NULL,
-                descripcion TEXT NOT NULL,
-                observaciones TEXT DEFAULT '',
-                FOREIGN KEY (expediente_id) REFERENCES expedientes(id) ON DELETE CASCADE
-            );
-
-            CREATE TABLE IF NOT EXISTS vencimientos (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                expediente_id INTEGER NOT NULL,
-                fecha TEXT NOT NULL,
-                descripcion TEXT NOT NULL,
-                estado TEXT DEFAULT 'pending' CHECK(estado IN ('pending','completed','overdue')),
-                FOREIGN KEY (expediente_id) REFERENCES expedientes(id) ON DELETE CASCADE
-            );
-
-            CREATE TABLE IF NOT EXISTS honorarios (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                expediente_id INTEGER NOT NULL,
-                fecha TEXT NOT NULL,
-                monto REAL NOT NULL,
-                moneda TEXT DEFAULT 'ARS' CHECK(moneda IN ('ARS','USD')),
-                concepto TEXT DEFAULT '',
-                forma_pago TEXT DEFAULT '',
-                FOREIGN KEY (expediente_id) REFERENCES expedientes(id) ON DELETE CASCADE
-            );
-
-            CREATE TABLE IF NOT EXISTS gastos (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                expediente_id INTEGER NOT NULL,
-                fecha TEXT NOT NULL,
-                monto REAL NOT NULL,
-                moneda TEXT DEFAULT 'ARS' CHECK(moneda IN ('ARS','USD')),
-                descripcion TEXT DEFAULT '',
-                FOREIGN KEY (expediente_id) REFERENCES expedientes(id) ON DELETE CASCADE
-            );
-
-            CREATE TABLE IF NOT EXISTS archivos_adjuntos (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                expediente_id INTEGER NOT NULL,
-                nombre_archivo TEXT NOT NULL,
-                ruta TEXT NOT NULL,
-                fecha TEXT NOT NULL,
-                descripcion TEXT DEFAULT '',
-                FOREIGN KEY (expediente_id) REFERENCES expedientes(id) ON DELETE CASCADE
-            );
-        """)
+        for create_sql in _SCHEMA_TABLAS.values():
+            conn.execute(create_sql)
         _migrate_db(conn)
 
 
@@ -577,6 +623,23 @@ def _get_adjuntos_dir() -> str:
     else:
         base = os.path.dirname(os.path.abspath(__file__))
     return os.path.join(base, "adjuntos")
+
+
+def _es_ruta_absoluta(ruta: str) -> bool:
+    """True for Unix, UNC or Windows drive-letter absolute paths."""
+    return ruta.startswith(("/", "\\")) or bool(re.match(r"^[A-Za-z]:[\\/]", ruta))
+
+
+def ruta_abs_adjunto(ruta: str) -> str:
+    """Resolves a stored attachment path to an absolute filesystem path.
+
+    Paths are stored relative to the adjuntos dir ("<case_id>/<file>") so the
+    whole app folder can be moved or restored elsewhere without breaking them.
+    Legacy absolute paths (pre-migration) are returned as-is.
+    """
+    if _es_ruta_absoluta(ruta):
+        return ruta
+    return os.path.join(_get_adjuntos_dir(), *ruta.replace("\\", "/").split("/"))
 
 
 def crear_adjunto(adj: ArchivoAdjunto) -> int:
